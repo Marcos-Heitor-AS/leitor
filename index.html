@@ -997,6 +997,8 @@ listEl.addEventListener("submit", (ev) => {
 /* atalhos para conferir o livro em sites de venda e no Google, já com o ISBN */
 function searchLinks(isbn) {
   return [
+    ["ISBNsearch", "https://isbnsearch.org/isbn/" + isbn],
+    ["CBL", "https://www.cblservicos.org.br/isbn/pesquisa/?page=1&q=" + isbn + "&sk="],
     ["Google", "https://www.google.com/search?q=ISBN+" + isbn],
     ["Estante Virtual", "https://www.estantevirtual.com.br/busca?q=" + isbn],
     ["Amazon", "https://www.amazon.com.br/s?k=" + isbn],
