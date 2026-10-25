@@ -217,6 +217,17 @@ button, input { font: inherit; color: inherit; }
 .copies button:hover { background: var(--bg); }
 .copies span { padding: 0 6px; font-size: .85rem; white-space: nowrap; }
 
+.alts { grid-column: 1 / -1; display: grid; gap: 6px; background: var(--warn-bg); border-radius: 8px; padding: 10px; font-size: .9rem; }
+.alts p { margin: 0; }
+.alts .hint { color: var(--muted); font-size: .82rem; }
+.alt {
+  display: grid; gap: 2px; text-align: left; cursor: pointer; min-height: 44px;
+  padding: 8px 10px; border-radius: 8px; border: 1.5px solid var(--line); background: var(--surface);
+}
+.alt:hover { border-color: var(--accent); }
+.alt b { overflow-wrap: anywhere; }
+.alt small { color: var(--muted); overflow-wrap: anywhere; }
+
 .edit { grid-column: 1 / -1; display: grid; gap: 8px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .edit label { display: grid; gap: 2px; font-size: .8rem; color: var(--muted); }
 .edit input { min-height: 40px; padding: 0 10px; border-radius: 6px; border: 1.5px solid var(--line); background: var(--bg); font-size: .95rem; }
@@ -330,7 +341,7 @@ button, input { font: inherit; color: inherit; }
       <ol class="list" id="list" aria-live="polite"></ol>
 
       <div class="footnote">
-        <p>Os dados vêm da BrasilAPI (que reúne CBL, Mercado Editorial, Open Library e Google Books) e, se ela não achar, da Open Library. Livro não encontrado continua na fila com o ISBN certo, para completar à mão.</p>
+        <p>Os dados vêm da BrasilAPI, que consulta CBL, Mercado Editorial, Google Books e Open Library. Cada fonte é consultada separadamente: quando elas discordam sobre o mesmo ISBN, a ficha fica como <b>Conferir título</b> e mostra as opções. Livro não encontrado continua na fila com o ISBN certo, para completar à mão.</p>
         <p>A fila fica guardada só neste navegador. A planilha sai com uma linha por exemplar e as colunas de tombo, categoria e origem em branco, para completar depois.</p>
       </div>
     </section>
@@ -411,47 +422,105 @@ async function fetchJson(url, ms = 9000) {
   } finally { clearTimeout(t); }
 }
 
+/* A BrasilAPI sozinha devolve a fonte que responder primeiro, e as fontes às vezes
+   discordam (editoras antigas reaproveitavam ISBN). Por isso cada fonte é consultada
+   separadamente, na ordem de confiança abaixo, e as divergências vão para a operadora. */
+const PROVIDERS = [
+  ["cbl", "CBL"], ["mercado-editorial", "Mercado Editorial"],
+  ["google-books", "Google Books"], ["open-library", "Open Library"]
+];
+const FIELDS = ["title", "subtitle", "authors", "publisher", "year", "pages", "cover", "source"];
+
+/* a fonte às vezes devolve o ISBN-10; compara já convertido */
+function sameIsbn(got, isbn) {
+  const c = ISBN.clean(got);
+  if (!c) return true;
+  return (c.length === 10 ? ISBN.tenTo13(c) : c) === isbn;
+}
+function titleKey(t) {
+  return String(t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function fromBrasilApi(isbn, provider, label) {
+  const r = await fetchJson("https://brasilapi.com.br/api/isbn/v1/" + isbn + "?providers=" + provider);
+  const d = r.data;
+  if (!d || !d.title || !sameIsbn(d.isbn, isbn)) return null;
+  return {
+    title: d.title || "", subtitle: d.subtitle || "",
+    authors: Array.isArray(d.authors) ? d.authors.join("; ") : (d.authors || ""),
+    publisher: d.publisher || "", year: d.year ? String(d.year) : "",
+    pages: d.page_count ? String(d.page_count) : "",
+    cover: d.cover_url || "", source: label
+  };
+}
+
+async function fromOpenLibrary(isbn) {
+  const key = "ISBN:" + isbn;
+  const r = await fetchJson("https://openlibrary.org/api/books?bibkeys=" + key + "&format=json&jscmd=data");
+  const d = r.data && r.data[key];
+  if (!d || !d.title) return null;
+  return {
+    title: d.title || "", subtitle: d.subtitle || "",
+    authors: (d.authors || []).map(a => a.name).join("; "),
+    publisher: (d.publishers || []).map(p => p.name).join("; "),
+    year: (String(d.publish_date || "").match(/\d{4}/) || [""])[0],
+    pages: d.number_of_pages ? String(d.number_of_pages) : "",
+    cover: (d.cover && (d.cover.medium || d.cover.small)) || "", source: "Open Library"
+  };
+}
+
+/* mesmo título com pequenas diferenças: "Akira" e "Akira vol. 1", ou erro de digitação de uma fonte */
+function sameTitle(a, b) {
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  const longWords = new Set(long.split(" "));
+  const sw = short.split(" ");
+  if (sw.some(w => w.length >= 4) && sw.every(w => longWords.has(w))) return true;
+  let prev = Array.from({ length: long.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= short.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= long.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (short[i - 1] === long[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[long.length] / long.length <= 0.2;
+}
+
+/* junta as respostas que falam do mesmo título, completando os campos vazios */
+function groupOptions(list) {
+  const groups = [];
+  for (const o of list) {
+    const k = titleKey(o.title);
+    const g = groups.find(x => sameTitle(x.key, k));
+    if (!g) { groups.push({ key: k, opt: { ...o } }); continue; }
+    FIELDS.forEach(f => { if (!g.opt[f] && o[f]) g.opt[f] = o[f]; });
+    g.opt.source += " + " + o.source;
+  }
+  return groups.map(g => g.opt);
+}
+
 async function lookup(isbn) {
-  let networkFailed = 0;
-  try {
-    const r = await fetchJson("https://brasilapi.com.br/api/isbn/v1/" + isbn);
-    if (r.data && r.data.title) {
-      const d = r.data;
-      return {
-        title: d.title || "", subtitle: d.subtitle || "",
-        authors: Array.isArray(d.authors) ? d.authors.join("; ") : (d.authors || ""),
-        publisher: d.publisher || "", year: d.year ? String(d.year) : "",
-        pages: d.page_count ? String(d.page_count) : "",
-        cover: d.cover_url || "", source: "BrasilAPI" + (d.provider ? " · " + d.provider : "")
-      };
-    }
-  } catch (_) { networkFailed++; }
+  const settled = await Promise.allSettled(PROVIDERS.map(([p, label]) => fromBrasilApi(isbn, p, label)));
+  let found = settled.filter(s => s.status === "fulfilled" && s.value).map(s => s.value);
 
-  try {
-    const key = "ISBN:" + isbn;
-    const r = await fetchJson("https://openlibrary.org/api/books?bibkeys=" + key + "&format=json&jscmd=data");
-    const d = r.data && r.data[key];
-    if (d && d.title) {
-      const year = (String(d.publish_date || "").match(/\d{4}/) || [""])[0];
-      return {
-        title: d.title || "", subtitle: d.subtitle || "",
-        authors: (d.authors || []).map(a => a.name).join("; "),
-        publisher: (d.publishers || []).map(p => p.name).join("; "),
-        year, pages: d.number_of_pages ? String(d.number_of_pages) : "",
-        cover: (d.cover && (d.cover.medium || d.cover.small)) || "", source: "Open Library"
-      };
-    }
-  } catch (_) { networkFailed++; }
-
-  return networkFailed === 2 ? { offline: true } : { notFound: true };
+  // BrasilAPI fora do ar: tenta a Open Library direto
+  if (!found.length && settled.every(s => s.status === "rejected")) {
+    try { const ol = await fromOpenLibrary(isbn); if (ol) found = [ol]; }
+    catch (_) { return { offline: true }; }
+  }
+  return found.length ? { options: groupOptions(found) } : { notFound: true };
 }
 
 async function resolveItem(item) {
-  item.status = "buscando"; render();
+  item.status = "buscando"; item.alts = []; render();
   const r = await lookup(item.isbn);
   if (r.offline) item.status = "erro";
   else if (r.notFound) item.status = "nao_encontrado";
-  else { Object.assign(item, r); item.status = "encontrado"; }
+  else {
+    const [first, ...rest] = r.options;
+    Object.assign(item, first);
+    item.alts = rest;
+    item.status = rest.length ? "conferir" : "encontrado";
+  }
   persist(); render();
 }
 
@@ -756,6 +825,7 @@ const emptyEl = document.getElementById("empty");
 const STATUS = {
   buscando: ["wait", "Buscando dados"],
   encontrado: ["ok", "Encontrado"],
+  conferir: ["warn", "Conferir título"],
   nao_encontrado: ["warn", "Completar à mão"],
   erro: ["err", "Sem conexão"]
 };
@@ -801,11 +871,17 @@ function render() {
             <span>${q.copies} ${q.copies > 1 ? "exemplares" : "exemplar"}</span>
             <button type="button" data-act="plus" data-id="${q.id}" aria-label="Mais um exemplar">+</button>
           </span>
-          <button class="btn small ghost" type="button" data-act="edit" data-id="${q.id}">${editing ? "Fechar" : (q.status === "encontrado" ? "Corrigir" : "Completar")}</button>
+          <button class="btn small ghost" type="button" data-act="edit" data-id="${q.id}">${editing ? "Fechar" : (q.status === "encontrado" || q.status === "conferir" ? "Corrigir" : "Completar")}</button>
           ${q.status === "erro" ? `<button class="btn small" type="button" data-act="retry" data-id="${q.id}">Buscar de novo</button>` : ""}
           <button class="btn small ghost danger" type="button" data-act="remove" data-id="${q.id}">Remover</button>
         </div>
       </div>
+      ${q.status === "conferir" && q.alts && q.alts.length ? `<div class="alts">
+        <p><b>As fontes não concordam sobre este ISBN.</b> Qual é o livro que está na sua mão?</p>
+        <button class="alt" type="button" data-act="keep" data-id="${q.id}"><b>${esc(q.title)}</b><small>${esc([q.authors, q.publisher, q.year].filter(Boolean).join(" · "))} · ${esc(q.source)}</small></button>
+        ${q.alts.map((a, i) => `<button class="alt" type="button" data-act="pick" data-i="${i}" data-id="${q.id}"><b>${esc(a.title)}</b><small>${esc([a.authors, a.publisher, a.year].filter(Boolean).join(" · "))} · ${esc(a.source)}</small></button>`).join("")}
+        <p class="hint">Nenhum desses? Use <b>Corrigir</b> e digite o título certo.</p>
+      </div>` : ""}
       ${editing ? `<form class="edit" data-id="${q.id}">
         <label>Título<input name="title" id="ed-title-${q.id}" value="${esc(q.title)}" required></label>
         <label>Autor(es)<input name="authors" id="ed-authors-${q.id}" value="${esc(q.authors)}" placeholder="Separe com ponto e vírgula"></label>
@@ -830,6 +906,14 @@ listEl.addEventListener("click", (ev) => {
   else if (act === "remove") { queue = queue.filter(x => x !== q); toast("Removido da fila.", "ok"); }
   else if (act === "edit") editingId = editingId === q.id ? null : q.id;
   else if (act === "retry") { resolveItem(q); return; }
+  else if (act === "keep" || act === "pick") {
+    if (act === "pick") {
+      const a = q.alts[Number(b.dataset.i)];
+      FIELDS.forEach(f => { q[f] = a[f] || ""; });
+    }
+    q.alts = []; q.status = "encontrado"; q.source += " (conferido)";
+    flashCard(q.id);
+  }
   persist(); render();
   if (act === "edit" && editingId) { const f = document.getElementById("ed-title-" + q.id); f && f.focus(); }
 });
@@ -847,6 +931,7 @@ listEl.addEventListener("submit", (ev) => {
   q.publisher = String(fd.get("publisher") || "").trim();
   q.year = String(fd.get("year") || "").trim();
   if (q.title && q.status !== "encontrado") { q.status = "encontrado"; q.source = "preenchido à mão"; }
+  q.alts = [];
   editingId = null;
   persist(); render(); flashCard(q.id);
 });
@@ -863,12 +948,13 @@ function flashCard(id) {
 
 /* ---------- Planilha (uma linha por exemplar) ---------- */
 document.getElementById("btnExport").addEventListener("click", () => {
-  const head = ["tombo", "isbn", "titulo", "subtitulo", "autores", "editora", "ano", "paginas", "categoria", "origem", "data_leitura", "fonte_dos_dados", "situacao"];
+  const head = ["tombo", "isbn", "titulo", "subtitulo", "autores", "editora", "ano", "paginas", "categoria", "origem", "data_leitura", "fonte_dos_dados", "situacao", "outros_titulos"];
   const rows = [head];
   [...queue].reverse().forEach(q => {
     for (let i = 0; i < q.copies; i++) {
       rows.push(["", q.isbn, q.title, q.subtitle, q.authors, q.publisher, q.year, q.pages, "", "",
-        q.readAt.slice(0, 10), q.source, (STATUS[q.status] || [, ""])[1]]);
+        q.readAt.slice(0, 10), q.source, (STATUS[q.status] || [, ""])[1],
+        (q.alts || []).map(a => a.title + " (" + a.source + ")").join(" | ")]);
     }
   });
   const csv = rows.map(r => r.map(v => {
@@ -927,8 +1013,9 @@ document.getElementById("httpsNotice").hidden = !!window.isSecureContext;
     }
   } catch (_) { document.getElementById("engineName").textContent = "ZXing (JavaScript)"; }
 })();
-// itens que ficaram "buscando" quando a página fechou voltam a buscar
-queue.filter(q => q.status === "buscando").forEach(resolveItem);
+// itens que ficaram "buscando" quando a página fechou voltam a buscar, e também os lidos
+// pela versão antiga (sem "alts"), que confiava na primeira fonte e pode ter trazido o título errado
+queue.filter(q => q.status === "buscando" || (!("alts" in q) && q.source !== "preenchido à mão")).forEach(resolveItem);
 render();
 </script>
 </body>
