@@ -217,16 +217,29 @@ button, input { font: inherit; color: inherit; }
 .copies button:hover { background: var(--bg); }
 .copies span { padding: 0 6px; font-size: .85rem; white-space: nowrap; }
 
-.alts { grid-column: 1 / -1; display: grid; gap: 6px; background: var(--warn-bg); border-radius: 8px; padding: 10px; font-size: .9rem; }
-.alts p { margin: 0; }
-.alts .hint { color: var(--muted); font-size: .82rem; }
-.alt {
-  display: grid; gap: 2px; text-align: left; cursor: pointer; min-height: 44px;
-  padding: 8px 10px; border-radius: 8px; border: 1.5px solid var(--line); background: var(--surface);
+/* Janela de escolha: sobe de baixo no celular, centralizada no PC */
+.sheet-backdrop {
+  position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / .5);
+  display: grid; align-items: end; justify-items: center; padding: 16px;
 }
-.alt:hover { border-color: var(--accent); }
-.alt b { overflow-wrap: anywhere; }
-.alt small { color: var(--muted); overflow-wrap: anywhere; }
+@media (min-width: 640px) { .sheet-backdrop { align-items: center; } }
+.sheet {
+  width: min(520px, 100%); max-height: calc(100dvh - 32px); overflow: auto;
+  background: var(--surface); border-radius: 16px; display: grid; gap: 10px;
+  padding: 18px 18px calc(18px + env(safe-area-inset-bottom, 0px));
+  box-shadow: 0 20px 50px rgb(0 0 0 / .35);
+}
+.sheet h2 { font: 800 1.3rem/1.2 var(--f-display); margin: 0; text-wrap: balance; }
+.sheet-isbn { margin: 0; font-family: var(--f-mono); font-size: .85rem; color: var(--muted); }
+.sheet-hint { margin: 0; color: var(--muted); font-size: .92rem; }
+.sheet-list { display: grid; gap: 8px; margin: 4px 0; }
+.choice {
+  display: grid; gap: 2px; text-align: left; cursor: pointer; min-height: 60px;
+  padding: 10px 14px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--bg);
+}
+.choice:hover, .choice:focus-visible { border-color: var(--accent); }
+.choice b { font: 600 1.08rem/1.25 var(--f-display); overflow-wrap: anywhere; }
+.choice span { color: var(--muted); overflow-wrap: anywhere; }
 
 .edit { grid-column: 1 / -1; display: grid; gap: 8px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .edit label { display: grid; gap: 2px; font-size: .8rem; color: var(--muted); }
@@ -341,10 +354,21 @@ button, input { font: inherit; color: inherit; }
       <ol class="list" id="list" aria-live="polite"></ol>
 
       <div class="footnote">
-        <p>Os dados vêm da BrasilAPI, que consulta CBL, Mercado Editorial, Google Books e Open Library. Cada fonte é consultada separadamente: quando elas discordam sobre o mesmo ISBN, a ficha fica como <b>Conferir título</b> e mostra as opções. Livro não encontrado continua na fila com o ISBN certo, para completar à mão.</p>
+        <p>Os dados vêm da BrasilAPI, que consulta CBL, Mercado Editorial, Google Books e Open Library. Também consulta o Google Books e a Open Library direto. Quando as fontes trazem livros diferentes para o mesmo ISBN, abre uma janela para você escolher o certo. Livro não encontrado continua na fila com o ISBN certo, para completar à mão.</p>
         <p>A fila fica guardada só neste navegador. A planilha sai com uma linha por exemplar e as colunas de tombo, categoria e origem em branco, para completar depois.</p>
       </div>
     </section>
+  </div>
+</div>
+
+<div class="sheet-backdrop" id="sheet" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <p class="sheet-isbn" id="sheetIsbn"></p>
+    <h2 id="sheetTitle">Qual é o livro que está na sua mão?</h2>
+    <p class="sheet-hint">As fontes trouxeram mais de um livro para este código. Toque no certo.</p>
+    <div class="sheet-list" id="sheetList"></div>
+    <button class="btn" id="sheetNone" type="button">Nenhum destes: digitar à mão</button>
+    <button class="btn ghost" id="sheetLater" type="button">Decidir depois</button>
   </div>
 </div>
 
@@ -469,20 +493,18 @@ async function fromOpenLibrary(isbn) {
   };
 }
 
-/* mesmo título com pequenas diferenças: "Akira" e "Akira vol. 1", ou erro de digitação de uma fonte */
+/* só junta títulos praticamente iguais (maiúsculas, acentos, um erro de digitação);
+   qualquer diferença maior vira uma opção para a operadora escolher */
 function sameTitle(a, b) {
   if (a === b) return true;
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  const longWords = new Set(long.split(" "));
-  const sw = short.split(" ");
-  if (sw.some(w => w.length >= 4) && sw.every(w => longWords.has(w))) return true;
   let prev = Array.from({ length: long.length + 1 }, (_, j) => j);
   for (let i = 1; i <= short.length; i++) {
     const cur = [i];
     for (let j = 1; j <= long.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (short[i - 1] === long[j - 1] ? 0 : 1));
     prev = cur;
   }
-  return prev[long.length] / long.length <= 0.2;
+  return prev[long.length] / long.length <= 0.12;
 }
 
 /* junta as respostas que falam do mesmo título, completando os campos vazios */
@@ -493,25 +515,42 @@ function groupOptions(list) {
     const g = groups.find(x => sameTitle(x.key, k));
     if (!g) { groups.push({ key: k, opt: { ...o } }); continue; }
     FIELDS.forEach(f => { if (!g.opt[f] && o[f]) g.opt[f] = o[f]; });
-    g.opt.source += " + " + o.source;
+    if (!g.opt.source.split(" + ").includes(o.source)) g.opt.source += " + " + o.source;
   }
   return groups.map(g => g.opt);
 }
 
-async function lookup(isbn) {
-  const settled = await Promise.allSettled(PROVIDERS.map(([p, label]) => fromBrasilApi(isbn, p, label)));
-  let found = settled.filter(s => s.status === "fulfilled" && s.value).map(s => s.value);
-
-  // BrasilAPI fora do ar: tenta a Open Library direto
-  if (!found.length && settled.every(s => s.status === "rejected")) {
-    try { const ol = await fromOpenLibrary(isbn); if (ol) found = [ol]; }
-    catch (_) { return { offline: true }; }
-  }
-  return found.length ? { options: groupOptions(found) } : { notFound: true };
+/* Google Books direto: a busca "isbn:" às vezes traz livros parecidos, então só
+   vale o volume que tem exatamente este ISBN */
+async function fromGoogleBooks(isbn) {
+  const r = await fetchJson("https://www.googleapis.com/books/v1/volumes?q=isbn:" + isbn);
+  const items = (r.data && r.data.items) || [];
+  const hit = items.find(it => ((it.volumeInfo || {}).industryIdentifiers || [])
+    .some(id => /ISBN/.test(id.type) && sameIsbn(id.identifier, isbn)));
+  const d = hit && hit.volumeInfo;
+  if (!d || !d.title) return null;
+  return {
+    title: d.title || "", subtitle: d.subtitle || "",
+    authors: (d.authors || []).join("; "), publisher: d.publisher || "",
+    year: (String(d.publishedDate || "").match(/\d{4}/) || [""])[0],
+    pages: d.pageCount ? String(d.pageCount) : "",
+    cover: ((d.imageLinks && (d.imageLinks.thumbnail || d.imageLinks.smallThumbnail)) || "").replace(/^http:/, "https:"),
+    source: "Google Books"
+  };
 }
 
+async function lookup(isbn) {
+  const calls = PROVIDERS.map(([p, label]) => fromBrasilApi(isbn, p, label))
+    .concat(fromGoogleBooks(isbn), fromOpenLibrary(isbn));
+  const settled = await Promise.allSettled(calls);
+  const found = settled.filter(s => s.status === "fulfilled" && s.value).map(s => s.value);
+  if (found.length) return { options: groupOptions(found) };
+  return settled.every(s => s.status === "rejected") ? { offline: true } : { notFound: true };
+}
+
+const LOOKUP_VERSION = 3;
 async function resolveItem(item) {
-  item.status = "buscando"; item.alts = []; render();
+  item.status = "buscando"; item.alts = []; item.v = LOOKUP_VERSION; render();
   const r = await lookup(item.isbn);
   if (r.offline) item.status = "erro";
   else if (r.notFound) item.status = "nao_encontrado";
@@ -522,6 +561,7 @@ async function resolveItem(item) {
     item.status = rest.length ? "conferir" : "encontrado";
   }
   persist(); render();
+  if (item.status === "conferir") nextChoice();
 }
 
 /* ---------- Entrada de códigos (câmera, foto, digitação, leitor USB) ---------- */
@@ -825,7 +865,7 @@ const emptyEl = document.getElementById("empty");
 const STATUS = {
   buscando: ["wait", "Buscando dados"],
   encontrado: ["ok", "Encontrado"],
-  conferir: ["warn", "Conferir título"],
+  conferir: ["warn", "Escolher o livro"],
   nao_encontrado: ["warn", "Completar à mão"],
   erro: ["err", "Sem conexão"]
 };
@@ -871,17 +911,12 @@ function render() {
             <span>${q.copies} ${q.copies > 1 ? "exemplares" : "exemplar"}</span>
             <button type="button" data-act="plus" data-id="${q.id}" aria-label="Mais um exemplar">+</button>
           </span>
+          ${q.status === "conferir" ? `<button class="btn small" type="button" data-act="choose" data-id="${q.id}">Escolher livro (${q.alts.length + 1} opções)</button>` : ""}
           <button class="btn small ghost" type="button" data-act="edit" data-id="${q.id}">${editing ? "Fechar" : (q.status === "encontrado" || q.status === "conferir" ? "Corrigir" : "Completar")}</button>
           ${q.status === "erro" ? `<button class="btn small" type="button" data-act="retry" data-id="${q.id}">Buscar de novo</button>` : ""}
           <button class="btn small ghost danger" type="button" data-act="remove" data-id="${q.id}">Remover</button>
         </div>
       </div>
-      ${q.status === "conferir" && q.alts && q.alts.length ? `<div class="alts">
-        <p><b>As fontes não concordam sobre este ISBN.</b> Qual é o livro que está na sua mão?</p>
-        <button class="alt" type="button" data-act="keep" data-id="${q.id}"><b>${esc(q.title)}</b><small>${esc([q.authors, q.publisher, q.year].filter(Boolean).join(" · "))} · ${esc(q.source)}</small></button>
-        ${q.alts.map((a, i) => `<button class="alt" type="button" data-act="pick" data-i="${i}" data-id="${q.id}"><b>${esc(a.title)}</b><small>${esc([a.authors, a.publisher, a.year].filter(Boolean).join(" · "))} · ${esc(a.source)}</small></button>`).join("")}
-        <p class="hint">Nenhum desses? Use <b>Corrigir</b> e digite o título certo.</p>
-      </div>` : ""}
       ${editing ? `<form class="edit" data-id="${q.id}">
         <label>Título<input name="title" id="ed-title-${q.id}" value="${esc(q.title)}" required></label>
         <label>Autor(es)<input name="authors" id="ed-authors-${q.id}" value="${esc(q.authors)}" placeholder="Separe com ponto e vírgula"></label>
@@ -906,14 +941,7 @@ listEl.addEventListener("click", (ev) => {
   else if (act === "remove") { queue = queue.filter(x => x !== q); toast("Removido da fila.", "ok"); }
   else if (act === "edit") editingId = editingId === q.id ? null : q.id;
   else if (act === "retry") { resolveItem(q); return; }
-  else if (act === "keep" || act === "pick") {
-    if (act === "pick") {
-      const a = q.alts[Number(b.dataset.i)];
-      FIELDS.forEach(f => { q[f] = a[f] || ""; });
-    }
-    q.alts = []; q.status = "encontrado"; q.source += " (conferido)";
-    flashCard(q.id);
-  }
+  else if (act === "choose") { openChooser(q); return; }
   persist(); render();
   if (act === "edit" && editingId) { const f = document.getElementById("ed-title-" + q.id); f && f.focus(); }
 });
@@ -945,6 +973,55 @@ function flashCard(id) {
     setTimeout(() => el.classList.remove("flash"), 1200);
   });
 }
+
+/* ---------- Escolha do livro quando as fontes discordam ---------- */
+const sheetEl = document.getElementById("sheet"), sheetList = document.getElementById("sheetList");
+let sheetFor = null;
+
+function openChooser(q) {
+  sheetFor = q.id;
+  const opts = [q, ...q.alts];
+  document.getElementById("sheetIsbn").textContent = "ISBN " + ISBN.pretty(q.isbn);
+  sheetList.innerHTML = opts.map((o, i) => `<button class="choice" type="button" data-i="${i}">
+    <b>${esc(o.title)}</b><span>${esc(o.authors || "Autor não informado")}</span></button>`).join("");
+  sheetEl.hidden = false;
+  const first = sheetList.querySelector("button"); first && first.focus();
+}
+function closeChooser() { sheetEl.hidden = true; sheetFor = null; }
+/* abre a próxima ficha que ainda espera escolha, uma de cada vez */
+function nextChoice() {
+  if (sheetFor) return;
+  const q = queue.find(x => x.status === "conferir" && !x.later);
+  if (q) openChooser(q);
+}
+function chooserItem() { return queue.find(x => x.id === sheetFor); }
+
+sheetList.addEventListener("click", (ev) => {
+  const b = ev.target.closest("button.choice");
+  const q = chooserItem();
+  if (!b || !q) return;
+  const picked = [q, ...q.alts][Number(b.dataset.i)];
+  const chosen = {};
+  FIELDS.forEach(f => { chosen[f] = picked[f] || ""; });
+  Object.assign(q, chosen);
+  q.alts = []; q.status = "encontrado"; q.source += " (escolhido)";
+  closeChooser(); persist(); render(); flashCard(q.id); feedback(true, true);
+  nextChoice();
+});
+document.getElementById("sheetNone").addEventListener("click", () => {
+  const q = chooserItem();
+  if (!q) return;
+  FIELDS.forEach(f => { q[f] = ""; });
+  q.alts = []; q.status = "nao_encontrado"; editingId = q.id;
+  closeChooser(); persist(); render();
+  const f = document.getElementById("ed-title-" + q.id); f && f.focus();
+});
+document.getElementById("sheetLater").addEventListener("click", () => {
+  const q = chooserItem();
+  if (q) q.later = true;
+  closeChooser(); nextChoice();
+});
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && sheetFor) document.getElementById("sheetLater").click(); });
 
 /* ---------- Planilha (uma linha por exemplar) ---------- */
 document.getElementById("btnExport").addEventListener("click", () => {
@@ -1015,8 +1092,10 @@ document.getElementById("httpsNotice").hidden = !!window.isSecureContext;
 })();
 // itens que ficaram "buscando" quando a página fechou voltam a buscar, e também os lidos
 // pela versão antiga (sem "alts"), que confiava na primeira fonte e pode ter trazido o título errado
-queue.filter(q => q.status === "buscando" || (!("alts" in q) && q.source !== "preenchido à mão")).forEach(resolveItem);
+queue.filter(q => q.status === "buscando" ||
+  ((q.v || 0) < LOOKUP_VERSION && !/preenchido à mão|conferido|escolhido/.test(q.source || ""))).forEach(resolveItem);
 render();
+nextChoice();
 </script>
 </body>
 </html>
