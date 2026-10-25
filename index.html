@@ -244,6 +244,12 @@ button, input { font: inherit; color: inherit; }
 .edit { grid-column: 1 / -1; display: grid; gap: 8px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .edit label { display: grid; gap: 2px; font-size: .8rem; color: var(--muted); }
 .edit input { min-height: 40px; padding: 0 10px; border-radius: 6px; border: 1.5px solid var(--line); background: var(--bg); font-size: .95rem; }
+.search { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: .85rem; color: var(--muted); }
+.search a {
+  display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; border-radius: 999px;
+  border: 1.5px solid var(--line); background: var(--surface); color: var(--accent); font-weight: 700; text-decoration: none;
+}
+.search a:hover { border-color: var(--accent); }
 .edit .two { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; }
 
 /* Aviso flutuante */
@@ -367,6 +373,7 @@ button, input { font: inherit; color: inherit; }
     <h2 id="sheetTitle">Qual é o livro que está na sua mão?</h2>
     <p class="sheet-hint">As fontes trouxeram mais de um livro para este código. Toque no certo.</p>
     <div class="sheet-list" id="sheetList"></div>
+    <p class="search" id="sheetSearch"></p>
     <button class="btn" id="sheetNone" type="button">Nenhum destes: digitar à mão</button>
     <button class="btn ghost" id="sheetLater" type="button">Decidir depois</button>
   </div>
@@ -432,6 +439,20 @@ try {
 } catch (_) { /* sem armazenamento: segue só em memória */ }
 function persist() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify({ seq, items: queue })); } catch (_) {}
+}
+
+/* Correções da operadora: quando todas as fontes erram (ISBN impresso que pertence a
+   outro livro), a correção vale para as próximas leituras do mesmo ISBN, mesmo depois
+   de limpar a fila. Fica guardada só neste navegador. */
+const CORR_KEY = "leitor-isbn-correcoes-v1";
+let corrections = {};
+try { corrections = JSON.parse(localStorage.getItem(CORR_KEY) || "{}") || {}; } catch (_) {}
+function remember(q) {
+  const c = {};
+  FIELDS.forEach(f => { c[f] = q[f] || ""; });
+  c.source = "sua correção";
+  corrections[q.isbn] = c;
+  try { localStorage.setItem(CORR_KEY, JSON.stringify(corrections)); } catch (_) {}
 }
 
 /* ---------- Busca dos dados do livro ---------- */
@@ -520,10 +541,15 @@ function groupOptions(list) {
   return groups.map(g => g.opt);
 }
 
+/* Sem chave, o Google Books usa uma cota gratuita dividida com o mundo inteiro e
+   costuma recusar (erro 429). Com uma chave própria (grátis, 1.000 consultas por dia)
+   ele volta a responder. No Google Cloud, restrinja a chave ao endereço do site. */
+const GOOGLE_BOOKS_KEY = "";
+
 /* Google Books direto: a busca "isbn:" às vezes traz livros parecidos, então só
    vale o volume que tem exatamente este ISBN */
 async function fromGoogleBooks(isbn) {
-  const r = await fetchJson("https://www.googleapis.com/books/v1/volumes?q=isbn:" + isbn);
+  const r = await fetchJson("https://www.googleapis.com/books/v1/volumes?q=isbn:" + isbn + (GOOGLE_BOOKS_KEY ? "&key=" + GOOGLE_BOOKS_KEY : ""));
   const items = (r.data && r.data.items) || [];
   const hit = items.find(it => ((it.volumeInfo || {}).industryIdentifiers || [])
     .some(id => /ISBN/.test(id.type) && sameIsbn(id.identifier, isbn)));
@@ -540,6 +566,7 @@ async function fromGoogleBooks(isbn) {
 }
 
 async function lookup(isbn) {
+  if (corrections[isbn]) return { options: [{ ...corrections[isbn] }] };
   const calls = PROVIDERS.map(([p, label]) => fromBrasilApi(isbn, p, label))
     .concat(fromGoogleBooks(isbn), fromOpenLibrary(isbn));
   const settled = await Promise.allSettled(calls);
@@ -912,12 +939,13 @@ function render() {
             <button type="button" data-act="plus" data-id="${q.id}" aria-label="Mais um exemplar">+</button>
           </span>
           ${q.status === "conferir" ? `<button class="btn small" type="button" data-act="choose" data-id="${q.id}">Escolher livro (${q.alts.length + 1} opções)</button>` : ""}
-          <button class="btn small ghost" type="button" data-act="edit" data-id="${q.id}">${editing ? "Fechar" : (q.status === "encontrado" || q.status === "conferir" ? "Corrigir" : "Completar")}</button>
+          <button class="btn small ghost" type="button" data-act="edit" data-id="${q.id}">${editing ? "Fechar" : (q.status === "encontrado" || q.status === "conferir" ? "Livro errado? Corrigir" : "Completar")}</button>
           ${q.status === "erro" ? `<button class="btn small" type="button" data-act="retry" data-id="${q.id}">Buscar de novo</button>` : ""}
           <button class="btn small ghost danger" type="button" data-act="remove" data-id="${q.id}">Remover</button>
         </div>
       </div>
       ${editing ? `<form class="edit" data-id="${q.id}">
+        <p class="search">Veja qual é o livro: ${searchLinks(q.isbn)}</p>
         <label>Título<input name="title" id="ed-title-${q.id}" value="${esc(q.title)}" required></label>
         <label>Autor(es)<input name="authors" id="ed-authors-${q.id}" value="${esc(q.authors)}" placeholder="Separe com ponto e vírgula"></label>
         <div class="two">
@@ -953,16 +981,28 @@ listEl.addEventListener("submit", (ev) => {
   const q = queue.find(x => x.id === form.dataset.id);
   if (!q) return;
   const fd = new FormData(form);
-  q.title = String(fd.get("title") || "").trim();
-  q.subtitle = q.title ? q.subtitle : "";
+  const newTitle = String(fd.get("title") || "").trim();
+  // título trocado: capa, subtítulo e páginas eram do livro errado
+  if (titleKey(newTitle) !== titleKey(q.title)) { q.subtitle = ""; q.cover = ""; q.pages = ""; }
+  q.title = newTitle;
   q.authors = String(fd.get("authors") || "").trim();
   q.publisher = String(fd.get("publisher") || "").trim();
   q.year = String(fd.get("year") || "").trim();
-  if (q.title && q.status !== "encontrado") { q.status = "encontrado"; q.source = "preenchido à mão"; }
+  if (q.title) { q.status = "encontrado"; q.source = "preenchido à mão"; remember(q); }
   q.alts = [];
   editingId = null;
   persist(); render(); flashCard(q.id);
 });
+
+/* atalhos para conferir o livro em sites de venda e no Google, já com o ISBN */
+function searchLinks(isbn) {
+  return [
+    ["Google", "https://www.google.com/search?q=ISBN+" + isbn],
+    ["Estante Virtual", "https://www.estantevirtual.com.br/busca?q=" + isbn],
+    ["Amazon", "https://www.amazon.com.br/s?k=" + isbn],
+    ["Mercado Livre", "https://lista.mercadolivre.com.br/" + isbn]
+  ].map(([name, url]) => `<a href="${url}" target="_blank" rel="noopener">${name}</a>`).join("");
+}
 
 function flashCard(id) {
   requestAnimationFrame(() => {
@@ -981,7 +1021,8 @@ let sheetFor = null;
 function openChooser(q) {
   sheetFor = q.id;
   const opts = [q, ...q.alts];
-  document.getElementById("sheetIsbn").textContent = "ISBN " + ISBN.pretty(q.isbn);
+  document.getElementById("sheetIsbn").textContent = "ISBN " + ISBN.pretty(q.isbn) + q.isbn.slice(-1);
+  document.getElementById("sheetSearch").innerHTML = "Na dúvida, pesquise: " + searchLinks(q.isbn);
   sheetList.innerHTML = opts.map((o, i) => `<button class="choice" type="button" data-i="${i}">
     <b>${esc(o.title)}</b><span>${esc(o.authors || "Autor não informado")}</span></button>`).join("");
   sheetEl.hidden = false;
@@ -1005,6 +1046,7 @@ sheetList.addEventListener("click", (ev) => {
   FIELDS.forEach(f => { chosen[f] = picked[f] || ""; });
   Object.assign(q, chosen);
   q.alts = []; q.status = "encontrado"; q.source += " (escolhido)";
+  remember(q);
   closeChooser(); persist(); render(); flashCard(q.id); feedback(true, true);
   nextChoice();
 });
