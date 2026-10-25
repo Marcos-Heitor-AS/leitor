@@ -1,0 +1,935 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F6E66">
+<title>Leitor de ISBN</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+/* Mesa de catalogação: visor da câmera em cima e fila de fichas embaixo no celular; no PC, visor fixo à esquerda e fila à direita */
+:root {
+  --bg: #EDF3F1;
+  --surface: #FFFFFF;
+  --ink: #14211F;
+  --muted: #566764;
+  --line: #D2DEDA;
+  --accent: #0F6E66;
+  --accent-ink: #FFFFFF;
+  --scan: #F2C230;
+  --ok: #1E7A3D;
+  --warn: #9A5800;
+  --err: #B3261E;
+  --ok-bg: #E3F2E8;
+  --warn-bg: #FBF0DC;
+  --err-bg: #FBE4E2;
+  --viewer: #0B1110;
+
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --r: 10px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E1615; --surface: #16211F; --ink: #E5EEEC; --muted: #98AAA6; --line: #263532;
+    --accent: #4CC0B3; --accent-ink: #062320; --scan: #F5CE4A;
+    --ok: #63C584; --warn: #E6A84D; --err: #F28B80;
+    --ok-bg: #12291B; --warn-bg: #2E2210; --err-bg: #331614; --viewer: #050807;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0E1615; --surface: #16211F; --ink: #E5EEEC; --muted: #98AAA6; --line: #263532;
+  --accent: #4CC0B3; --accent-ink: #062320; --scan: #F5CE4A;
+  --ok: #63C584; --warn: #E6A84D; --err: #F28B80;
+  --ok-bg: #12291B; --warn-bg: #2E2210; --err-bg: #331614; --viewer: #050807;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+:root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 16px/1.5 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 16px 40px;
+  -webkit-tap-highlight-color: transparent;
+}
+img { max-width: 100%; }
+[hidden] { display: none !important; }
+button, input { font: inherit; color: inherit; }
+:focus-visible { outline: 3px solid var(--scan); outline-offset: 2px; }
+
+.app { max-width: 1120px; margin: 0 auto; display: grid; gap: 20px; }
+
+/* Cabeçalho */
+.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 16px; }
+.brand h1 {
+  font: 800 clamp(1.6rem, 5vw, 2.2rem)/1.05 var(--f-display);
+  letter-spacing: -0.02em; margin: 0; text-wrap: balance;
+}
+.brand p { margin: 4px 0 0; color: var(--muted); max-width: 52ch; }
+.tally { display: flex; gap: 16px; font-variant-numeric: tabular-nums; }
+.tally div { display: grid; }
+.tally b { font: 800 1.5rem/1 var(--f-display); }
+.tally span { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (min-width: 880px) {
+  .layout { grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); }
+  .scanner-col { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); }
+}
+.scanner-col, .queue-col { display: grid; gap: 14px; min-width: 0; }
+
+/* Aviso de HTTPS */
+.notice {
+  background: var(--warn-bg); color: var(--ink);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  border-radius: var(--r); padding: 12px 14px; font-size: .92rem;
+}
+.notice strong { color: var(--warn); }
+
+/* Visor */
+.viewer {
+  position: relative; background: var(--viewer); border-radius: 14px; overflow: hidden;
+  aspect-ratio: 4 / 3; max-width: 100%;
+}
+.viewer video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.guide {
+  position: absolute; left: 7%; right: 7%; top: 30%; bottom: 30%;
+  border-radius: 8px; pointer-events: none;
+  box-shadow: 0 0 0 999px rgb(0 0 0 / .38);
+  transition: box-shadow .2s;
+}
+.guide::before, .guide::after {
+  content: ""; position: absolute; inset: 0; border-radius: 8px;
+  border: 3px solid transparent;
+}
+.guide::before {
+  border-color: #fff transparent #fff transparent;
+  -webkit-mask: linear-gradient(90deg, #000 18%, transparent 18% 82%, #000 82%);
+          mask: linear-gradient(90deg, #000 18%, transparent 18% 82%, #000 82%);
+}
+.scanline {
+  position: absolute; left: 4%; right: 4%; height: 2px; top: 50%;
+  background: var(--scan); box-shadow: 0 0 12px var(--scan);
+  animation: sweep 1.8s ease-in-out infinite alternate;
+}
+@keyframes sweep { from { top: 12%; } to { top: 88%; } }
+@media (prefers-reduced-motion: reduce) { .scanline { animation: none; } }
+.viewer.idle .guide { display: none; }
+.viewer.hit .guide::after { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 22%, transparent); }
+.viewer-msg {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px;
+  color: #fff; font-size: .9rem; text-align: center;
+  background: linear-gradient(transparent, rgb(0 0 0 / .65));
+}
+.viewer-idle {
+  position: absolute; inset: 0; display: grid; place-content: center; gap: 12px;
+  text-align: center; color: #E5EEEC; padding: 20px;
+}
+.viewer-idle svg { margin: 0 auto; opacity: .85; }
+.viewer-idle p { margin: 0; max-width: 30ch; font-size: .95rem; color: #B9C8C5; }
+
+.engine { font-size: .78rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.engine code { font-family: var(--f-mono); font-size: .75rem; }
+
+/* Botões */
+.controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 48px; padding: 0 18px; border-radius: 999px; cursor: pointer;
+  border: 1.5px solid var(--line); background: var(--surface); font-weight: 700;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); flex: 1 1 180px; }
+.btn.small { min-height: 36px; padding: 0 12px; font-size: .88rem; }
+.btn.danger { color: var(--err); }
+.btn.ghost { border-color: transparent; background: transparent; }
+.btn[aria-pressed="true"] { background: var(--scan); color: #1d1600; border-color: var(--scan); }
+.btn svg { flex: none; }
+
+/* Digitação */
+.manual { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; display: grid; gap: 8px; }
+.manual label { font-weight: 700; }
+.manual .hint { font-size: .85rem; color: var(--muted); margin: 0; }
+.manual form { display: flex; gap: 8px; }
+.manual input {
+  flex: 1; width: 0; min-width: 0; min-height: 48px; padding: 0 14px; border-radius: 8px;
+  border: 1.5px solid var(--line); background: var(--bg);
+  font-family: var(--f-mono); font-size: 1.05rem; letter-spacing: .04em;
+}
+.manual input:focus { border-color: var(--accent); outline: none; }
+
+/* Fila */
+.queue-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.queue-head h2 { font: 800 1.25rem/1.2 var(--f-display); margin: 0; }
+.queue-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.empty {
+  border: 2px dashed var(--line); border-radius: 14px; padding: 28px 20px;
+  text-align: center; color: var(--muted); display: grid; gap: 12px; justify-items: center;
+}
+.empty p { margin: 0; max-width: 42ch; }
+
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 12px; display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px;
+  transition: box-shadow .3s, border-color .3s;
+}
+.card.flash { border-color: var(--scan); box-shadow: 0 0 0 3px color-mix(in srgb, var(--scan) 45%, transparent); }
+.cover {
+  width: 64px; height: 92px; border-radius: 4px; overflow: hidden;
+  background: var(--bg); border: 1px solid var(--line);
+  display: grid; place-items: center; color: var(--muted);
+}
+.cover img { width: 100%; height: 100%; object-fit: cover; }
+.body { min-width: 0; display: grid; gap: 4px; align-content: start; }
+.meta-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: .75rem; color: var(--muted); }
+.ficha { font-family: var(--f-mono); }
+.pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px;
+  font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+}
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.ok { color: var(--ok); background: var(--ok-bg); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); }
+.pill.err { color: var(--err); background: var(--err-bg); }
+.pill.wait { color: var(--muted); background: var(--bg); }
+.pill.wait::before { animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: .2; } }
+.title { font: 600 1.05rem/1.25 var(--f-display); margin: 0; overflow-wrap: anywhere; }
+.title.placeholder { color: var(--muted); font-style: italic; font-family: var(--f-body); font-weight: 400; }
+.byline { margin: 0; color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+.isbn { font-family: var(--f-mono); font-size: .88rem; letter-spacing: .03em; }
+.isbn .check { color: var(--accent); font-weight: 700; border-bottom: 2px solid var(--scan); }
+.row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
+.copies { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; font-variant-numeric: tabular-nums; }
+.copies button { border: 0; background: transparent; width: 34px; height: 34px; cursor: pointer; font-weight: 700; font-size: 1.1rem; }
+.copies button:hover { background: var(--bg); }
+.copies span { padding: 0 6px; font-size: .85rem; white-space: nowrap; }
+
+.edit { grid-column: 1 / -1; display: grid; gap: 8px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.edit label { display: grid; gap: 2px; font-size: .8rem; color: var(--muted); }
+.edit input { min-height: 40px; padding: 0 10px; border-radius: 6px; border: 1.5px solid var(--line); background: var(--bg); font-size: .95rem; }
+.edit .two { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; }
+
+/* Aviso flutuante */
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  width: min(520px, calc(100% - 32px));
+  background: var(--ink); color: var(--bg); border-radius: 12px; padding: 12px 14px;
+  display: flex; align-items: center; gap: 12px; z-index: 20;
+  box-shadow: 0 10px 30px rgb(0 0 0 / .25); font-size: .95rem;
+}
+.toast.warn { border-left: 5px solid var(--warn); }
+.toast.err { border-left: 5px solid var(--err); }
+.toast.ok { border-left: 5px solid var(--ok); }
+.toast p { margin: 0; flex: 1; min-width: 0; }
+.toast button { background: var(--bg); color: var(--ink); border: 0; border-radius: 999px; padding: 8px 14px; font-weight: 700; cursor: pointer; flex: none; }
+
+.footnote { color: var(--muted); font-size: .82rem; max-width: 70ch; }
+.footnote p { margin: 0 0 6px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1>Leitor de ISBN</h1>
+      <p>Aponte a câmera para o código de barras atrás do livro. Cada leitura entra na fila com os dados já buscados.</p>
+    </div>
+    <div class="tally" aria-live="polite">
+      <div><b id="tTitles">0</b><span>títulos</span></div>
+      <div><b id="tCopies">0</b><span>exemplares</span></div>
+      <div><b id="tMissing">0</b><span>sem dados</span></div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <section class="scanner-col" aria-label="Leitura">
+      <div class="notice" id="httpsNotice" hidden>
+        <strong>A câmera ao vivo precisa de HTTPS.</strong> Esta página foi aberta sem conexão segura, então o navegador bloqueia a câmera. Ainda dá para usar <b>Tirar foto</b>, digitar o número ou usar um leitor USB.
+      </div>
+
+      <div class="viewer idle" id="viewer">
+        <video id="video" playsinline muted></video>
+        <div class="viewer-idle" id="viewerIdle">
+          <svg width="88" height="52" viewBox="0 0 88 52" aria-hidden="true">
+            <g fill="currentColor">
+              <rect x="0" y="0" width="3" height="42"/><rect x="5" y="0" width="1.5" height="42"/><rect x="9" y="0" width="3" height="42"/>
+              <rect x="14" y="0" width="1.5" height="42"/><rect x="18" y="0" width="4" height="42"/><rect x="24" y="0" width="1.5" height="42"/>
+              <rect x="28" y="0" width="3" height="42"/><rect x="34" y="0" width="1.5" height="42"/><rect x="38" y="0" width="1.5" height="42"/>
+              <rect x="42" y="0" width="3" height="42"/><rect x="47" y="0" width="1.5" height="42"/><rect x="51" y="0" width="4" height="42"/>
+              <rect x="57" y="0" width="1.5" height="42"/><rect x="61" y="0" width="3" height="42"/><rect x="66" y="0" width="1.5" height="42"/>
+              <rect x="70" y="0" width="3" height="42"/><rect x="75" y="0" width="4" height="42"/><rect x="81" y="0" width="1.5" height="42"/>
+              <rect x="85" y="0" width="3" height="42"/>
+            </g>
+            <text x="44" y="51.5" text-anchor="middle" font-family="ui-monospace, monospace" font-size="8" fill="currentColor">978 85 ••••• •••</text>
+          </svg>
+          <p>Câmera desligada. Toque em <b>Abrir câmera</b> e deixe o código dentro do retângulo, a uns 15 cm.</p>
+        </div>
+        <div class="guide" aria-hidden="true"><div class="scanline"></div></div>
+        <div class="viewer-msg" id="viewerMsg" hidden>Aponte para o código de barras</div>
+      </div>
+
+      <div class="controls">
+        <button class="btn primary" id="btnStart" type="button">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/></svg>
+          <span>Abrir câmera</span>
+        </button>
+        <button class="btn" id="btnTorch" type="button" aria-pressed="false" hidden>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 2h8l-1 6H9L8 2zM9 8h6v4l-1 10h-4L9 12V8z"/></svg>
+          Lanterna
+        </button>
+        <label class="btn" for="photoInput">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h3l2-3h6l2 3h3a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="4"/></svg>
+          Tirar foto
+        </label>
+        <input id="photoInput" type="file" accept="image/*" capture="environment" hidden>
+      </div>
+
+      <div class="engine" id="engine">
+        <span>Leitura: <code id="engineName">verificando…</code></span>
+        <span id="camInfo"></span>
+      </div>
+
+      <div class="manual">
+        <label for="manualInput">Livro sem código de barras?</label>
+        <form id="manualForm" autocomplete="off">
+          <input id="manualInput" type="text" inputmode="text" enterkeyhint="done" placeholder="978 85 00000 00 0" maxlength="20" aria-describedby="manualHint">
+          <button class="btn" type="submit">Adicionar</button>
+        </form>
+        <p class="hint" id="manualHint">Digite o ISBN de 10 ou 13 dígitos, com ou sem traços. O leitor USB também funciona aqui: é só bipar.</p>
+      </div>
+    </section>
+
+    <section class="queue-col" aria-label="Fila de cadastro">
+      <div class="queue-head">
+        <h2>Fila de cadastro</h2>
+        <div class="queue-actions">
+          <button class="btn small" id="btnExport" type="button" disabled>Baixar planilha (CSV)</button>
+          <button class="btn small danger ghost" id="btnClear" type="button" disabled>Limpar fila</button>
+        </div>
+      </div>
+
+      <div class="empty" id="empty">
+        <p><b>A fila está vazia.</b> Leia o código de um livro, ou teste com um ISBN de exemplo para ver como os dados chegam.</p>
+        <button class="btn small" id="btnSample" type="button">Testar com um exemplo</button>
+      </div>
+
+      <ol class="list" id="list" aria-live="polite"></ol>
+
+      <div class="footnote">
+        <p>Os dados vêm da BrasilAPI (que reúne CBL, Mercado Editorial, Open Library e Google Books) e, se ela não achar, da Open Library. Livro não encontrado continua na fila com o ISBN certo, para completar à mão.</p>
+        <p>A fila fica guardada só neste navegador. A planilha sai com uma linha por exemplar e as colunas de tombo, categoria e origem em branco, para completar depois.</p>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden><p id="toastMsg"></p><button id="toastBtn" type="button" hidden></button></div>
+
+<script>
+"use strict";
+
+/* ---------- ISBN: validação e conversão ---------- */
+const ISBN = {
+  clean(raw) { return String(raw || "").toUpperCase().replace(/[^0-9X]/g, ""); },
+  eanOk(c) {
+    if (!/^\d{13}$/.test(c)) return false;
+    let s = 0;
+    for (let i = 0; i < 12; i++) s += Number(c[i]) * (i % 2 ? 3 : 1);
+    return (10 - (s % 10)) % 10 === Number(c[12]);
+  },
+  tenOk(c) {
+    if (!/^\d{9}[\dX]$/.test(c)) return false;
+    let s = 0;
+    for (let i = 0; i < 10; i++) s += (c[i] === "X" ? 10 : Number(c[i])) * (10 - i);
+    return s % 11 === 0;
+  },
+  tenTo13(c) {
+    const base = "978" + c.slice(0, 9);
+    let s = 0;
+    for (let i = 0; i < 12; i++) s += Number(base[i]) * (i % 2 ? 3 : 1);
+    return base + ((10 - (s % 10)) % 10);
+  },
+  /* Devolve { isbn } ou { error, code } */
+  normalize(raw) {
+    const c = ISBN.clean(raw);
+    if (c.length === 13) {
+      if (!/^\d{13}$/.test(c)) return { error: "formato", code: c };
+      if (!ISBN.eanOk(c)) return { error: "digito", code: c };
+      if (!/^97[89]/.test(c)) return { error: "nao_isbn", code: c };
+      return { isbn: c };
+    }
+    if (c.length === 10) {
+      if (!ISBN.tenOk(c)) return { error: "digito", code: c };
+      return { isbn: ISBN.tenTo13(c), from10: c };
+    }
+    return { error: "formato", code: c };
+  },
+  pretty(isbn) { return isbn.slice(0, 3) + " " + isbn.slice(3, 12); }
+};
+
+const ERR_MSG = {
+  formato: "Isso não parece um ISBN. Ele tem 10 ou 13 dígitos.",
+  digito: "O número não fecha com o dígito verificador. Confira se digitou certo.",
+  nao_isbn: "Esse código de barras não é de livro (ISBN começa com 978 ou 979)."
+};
+
+/* ---------- Fila (guardada no navegador) ---------- */
+const STORE_KEY = "leitor-isbn-fila-v1";
+let queue = [];
+let seq = 0;
+try {
+  const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+  if (saved && Array.isArray(saved.items)) { queue = saved.items; seq = saved.seq || queue.length; }
+} catch (_) { /* sem armazenamento: segue só em memória */ }
+function persist() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify({ seq, items: queue })); } catch (_) {}
+}
+
+/* ---------- Busca dos dados do livro ---------- */
+async function fetchJson(url, ms = 9000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctl.signal, headers: { Accept: "application/json" } });
+    if (r.status === 404) return { notFound: true };
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return { data: await r.json() };
+  } finally { clearTimeout(t); }
+}
+
+async function lookup(isbn) {
+  let networkFailed = 0;
+  try {
+    const r = await fetchJson("https://brasilapi.com.br/api/isbn/v1/" + isbn);
+    if (r.data && r.data.title) {
+      const d = r.data;
+      return {
+        title: d.title || "", subtitle: d.subtitle || "",
+        authors: Array.isArray(d.authors) ? d.authors.join("; ") : (d.authors || ""),
+        publisher: d.publisher || "", year: d.year ? String(d.year) : "",
+        pages: d.page_count ? String(d.page_count) : "",
+        cover: d.cover_url || "", source: "BrasilAPI" + (d.provider ? " · " + d.provider : "")
+      };
+    }
+  } catch (_) { networkFailed++; }
+
+  try {
+    const key = "ISBN:" + isbn;
+    const r = await fetchJson("https://openlibrary.org/api/books?bibkeys=" + key + "&format=json&jscmd=data");
+    const d = r.data && r.data[key];
+    if (d && d.title) {
+      const year = (String(d.publish_date || "").match(/\d{4}/) || [""])[0];
+      return {
+        title: d.title || "", subtitle: d.subtitle || "",
+        authors: (d.authors || []).map(a => a.name).join("; "),
+        publisher: (d.publishers || []).map(p => p.name).join("; "),
+        year, pages: d.number_of_pages ? String(d.number_of_pages) : "",
+        cover: (d.cover && (d.cover.medium || d.cover.small)) || "", source: "Open Library"
+      };
+    }
+  } catch (_) { networkFailed++; }
+
+  return networkFailed === 2 ? { offline: true } : { notFound: true };
+}
+
+async function resolveItem(item) {
+  item.status = "buscando"; render();
+  const r = await lookup(item.isbn);
+  if (r.offline) item.status = "erro";
+  else if (r.notFound) item.status = "nao_encontrado";
+  else { Object.assign(item, r); item.status = "encontrado"; }
+  persist(); render();
+}
+
+/* ---------- Entrada de códigos (câmera, foto, digitação, leitor USB) ---------- */
+let lastAccepted = { code: "", at: 0 };
+let lastRejected = { code: "", at: 0 };
+
+function handleCode(raw, via) {
+  const now = Date.now();
+  const r = ISBN.normalize(raw);
+
+  if (r.error) {
+    if (via === "câmera" && lastRejected.code === r.code && now - lastRejected.at < 4000) return false;
+    lastRejected = { code: r.code, at: now };
+    toast(ERR_MSG[r.error], "warn");
+    feedback(false);
+    return false;
+  }
+
+  // a câmera continua vendo o mesmo livro: ignora repetições por alguns segundos
+  if (via === "câmera" && lastAccepted.code === r.isbn && now - lastAccepted.at < 4000) {
+    lastAccepted.at = now;
+    return false;
+  }
+  lastAccepted = { code: r.isbn, at: now };
+
+  const existing = queue.find(q => q.isbn === r.isbn);
+  if (existing) {
+    flashCard(existing.id);
+    feedback(true, true);
+    toast("Esse título já está na fila (" + existing.copies + " " + (existing.copies > 1 ? "exemplares" : "exemplar") + ").", "ok", {
+      label: "+1 exemplar", run() { existing.copies++; persist(); render(); flashCard(existing.id); toast("Agora são " + existing.copies + " exemplares.", "ok"); }
+    });
+    return true;
+  }
+
+  const item = {
+    id: "i" + now.toString(36) + Math.random().toString(36).slice(2, 6),
+    n: ++seq, isbn: r.isbn, from10: r.from10 || "", copies: 1, via,
+    readAt: new Date().toISOString(), status: "buscando",
+    title: "", subtitle: "", authors: "", publisher: "", year: "", pages: "", cover: "", source: ""
+  };
+  queue.unshift(item);
+  persist(); render(); flashCard(item.id);
+  feedback(true);
+  resolveItem(item);
+  return true;
+}
+
+/* bipe e vibração */
+let audioCtx = null;
+function feedback(ok, soft) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = "sine"; o.frequency.value = ok ? (soft ? 660 : 1320) : 220;
+    g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.25, audioCtx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + (ok ? 0.12 : 0.3));
+    o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.32);
+  } catch (_) {}
+  try { navigator.vibrate && navigator.vibrate(ok ? 60 : [40, 60, 40]); } catch (_) {}
+  if (ok) {
+    viewer.classList.add("hit");
+    setTimeout(() => viewer.classList.remove("hit"), 450);
+  }
+}
+
+/* ---------- Motor de leitura ---------- */
+const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js";
+const Engine = {
+  kind: null, detector: null, reader: null, hints: null, hintsHard: null,
+  async init() {
+    if (this.kind) return this.kind;
+    try {
+      if ("BarcodeDetector" in window) {
+        const formats = await window.BarcodeDetector.getSupportedFormats();
+        if (formats.includes("ean_13")) {
+          this.detector = new window.BarcodeDetector({ formats: ["ean_13"] });
+          this.kind = "native";
+          return this.kind;
+        }
+      }
+    } catch (_) {}
+    await loadScript(ZXING_URL);
+    const Z = window.ZXing;
+    this.reader = new Z.MultiFormatReader();
+    this.hints = new Map([[Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13]]]);
+    this.hintsHard = new Map([[Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13]], [Z.DecodeHintType.TRY_HARDER, true]]);
+    this.kind = "zxing";
+    return this.kind;
+  },
+  /* lê um canvas e devolve o texto do código, ou null */
+  async read(canvas, hard) {
+    if (this.kind === "native") {
+      const found = await this.detector.detect(canvas);
+      return found.length ? found[0].rawValue : null;
+    }
+    const Z = window.ZXing;
+    try {
+      const lum = new Z.HTMLCanvasElementLuminanceSource(canvas);
+      const bmp = new Z.BinaryBitmap(new Z.HybridBinarizer(lum));
+      return this.reader.decode(bmp, hard ? this.hintsHard : this.hints).getText();
+    } catch (_) { return null; }
+    finally { try { this.reader.reset(); } catch (_) {} }
+  },
+  label() { return this.kind === "native" ? "nativa do navegador (BarcodeDetector)" : this.kind === "zxing" ? "ZXing (JavaScript)" : "indisponível"; }
+};
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src; s.async = true; s.onload = res;
+    s.onerror = () => rej(new Error("Não foi possível carregar o leitor (" + src + ")."));
+    document.head.appendChild(s);
+  });
+}
+
+/* ---------- Câmera ao vivo ---------- */
+const video = document.getElementById("video");
+const viewer = document.getElementById("viewer");
+const viewerIdle = document.getElementById("viewerIdle");
+const viewerMsg = document.getElementById("viewerMsg");
+const btnStart = document.getElementById("btnStart");
+const btnTorch = document.getElementById("btnTorch");
+const camInfo = document.getElementById("camInfo");
+const frame = document.createElement("canvas");
+const fctx = frame.getContext("2d", { willReadFrequently: true });
+
+const Cam = {
+  stream: null, track: null, running: false, busy: false, timer: 0,
+  candidate: { code: "", hits: 0, at: 0 }, wakeLock: null, torchOn: false,
+
+  async start() {
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast("Este navegador não libera a câmera aqui (precisa de HTTPS). Use Tirar foto ou digite o ISBN.", "warn");
+      return;
+    }
+    btnStart.disabled = true;
+    try {
+      await Engine.init();
+      updateEngineLabel();
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+    } catch (e) {
+      btnStart.disabled = false;
+      const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+      toast(denied ? "A câmera foi bloqueada. Libere o acesso nas permissões do site e tente de novo." : (e && e.message) || "Não consegui abrir a câmera.", "err");
+      return;
+    }
+    this.track = this.stream.getVideoTracks()[0];
+    try {
+      const caps = this.track.getCapabilities ? this.track.getCapabilities() : {};
+      if (caps.focusMode && caps.focusMode.includes("continuous")) await this.track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+      btnTorch.hidden = !caps.torch;
+    } catch (_) {}
+    video.srcObject = this.stream;
+    await video.play().catch(() => {});
+    const s = this.track.getSettings ? this.track.getSettings() : {};
+    camInfo.textContent = s.width ? "Câmera: " + s.width + "×" + s.height : "";
+    this.running = true;
+    viewer.classList.remove("idle"); viewerIdle.hidden = true; viewerMsg.hidden = false;
+    btnStart.disabled = false; setStartLabel(true);
+    this.requestWake();
+    this.loop();
+  },
+
+  stop() {
+    this.running = false; clearTimeout(this.timer);
+    if (this.stream) this.stream.getTracks().forEach(t => t.stop());
+    this.stream = this.track = null; this.torchOn = false;
+    video.srcObject = null;
+    viewer.classList.add("idle"); viewerIdle.hidden = false; viewerMsg.hidden = true;
+    btnTorch.hidden = true; btnTorch.setAttribute("aria-pressed", "false");
+    camInfo.textContent = "";
+    setStartLabel(false);
+    if (this.wakeLock) { this.wakeLock.release().catch(() => {}); this.wakeLock = null; }
+  },
+
+  async requestWake() {
+    try { if ("wakeLock" in navigator) this.wakeLock = await navigator.wakeLock.request("screen"); } catch (_) {}
+  },
+
+  async toggleTorch() {
+    if (!this.track) return;
+    try {
+      this.torchOn = !this.torchOn;
+      await this.track.applyConstraints({ advanced: [{ torch: this.torchOn }] });
+      btnTorch.setAttribute("aria-pressed", String(this.torchOn));
+    } catch (_) { this.torchOn = false; toast("A lanterna não respondeu neste aparelho.", "warn"); }
+  },
+
+  /* recorta a faixa do retângulo-guia e manda para o motor, ~7 vezes por segundo */
+  async loop() {
+    if (!this.running) return;
+    if (!this.busy && video.readyState >= 2 && !document.hidden) {
+      this.busy = true;
+      try {
+        const vw = video.videoWidth, vh = video.videoHeight;
+        const sx = vw * 0.04, sw = vw * 0.92, sy = vh * 0.25, sh = vh * 0.5;
+        const scale = Math.min(1, 960 / sw);
+        frame.width = Math.round(sw * scale); frame.height = Math.round(sh * scale);
+        fctx.drawImage(video, sx, sy, sw, sh, 0, 0, frame.width, frame.height);
+        const text = await Engine.read(frame, false);
+        if (text) this.consider(text);
+      } catch (_) {}
+      this.busy = false;
+    }
+    this.timer = setTimeout(() => this.loop(), 140);
+  },
+
+  /* só aceita quando o mesmo código aparece em 2 quadros seguidos */
+  consider(text) {
+    const now = Date.now(), c = this.candidate;
+    if (c.code === text && now - c.at < 1200) c.hits++;
+    else { c.code = text; c.hits = 1; }
+    c.at = now;
+    if (c.hits >= 2) { c.hits = 0; handleCode(text, "câmera"); }
+  }
+};
+
+function setStartLabel(on) {
+  btnStart.querySelector("span").textContent = on ? "Parar câmera" : "Abrir câmera";
+  btnStart.classList.toggle("primary", !on);
+}
+function updateEngineLabel() { document.getElementById("engineName").textContent = Engine.label(); }
+
+btnStart.addEventListener("click", () => (Cam.running ? Cam.stop() : Cam.start()));
+btnTorch.addEventListener("click", () => Cam.toggleTorch());
+document.addEventListener("visibilitychange", () => { if (!document.hidden && Cam.running) Cam.requestWake(); });
+
+/* ---------- Foto (funciona sem HTTPS e em qualquer celular) ---------- */
+document.getElementById("photoInput").addEventListener("change", async (ev) => {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = "";
+  if (!file) return;
+  toast("Procurando o código na foto…", "ok");
+  try {
+    await Engine.init(); updateEngineLabel();
+    const img = await loadImage(file);
+    const c = document.createElement("canvas");
+    const cx = c.getContext("2d", { willReadFrequently: true });
+    const tries = [0, 90];
+    for (const rot of tries) {
+      for (const max of [1600, 1000]) {
+        const s = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.round(img.width * s), h = Math.round(img.height * s);
+        if (rot === 90) { c.width = h; c.height = w; cx.setTransform(0, 1, -1, 0, h, 0); }
+        else { c.width = w; c.height = h; cx.setTransform(1, 0, 0, 1, 0, 0); }
+        cx.drawImage(img, 0, 0, w, h);
+        const text = await Engine.read(c, true);
+        if (text) { hideToast(); handleCode(text, "foto"); return; }
+      }
+    }
+    toast("Não achei o código de barras na foto. Chegue mais perto, com boa luz, ou digite o ISBN.", "warn");
+    feedback(false);
+  } catch (e) {
+    toast((e && e.message) || "Não consegui ler a foto.", "err");
+  }
+});
+
+function loadImage(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); res(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("Não consegui abrir essa imagem.")); };
+    img.src = url;
+  });
+}
+
+/* ---------- Digitação e leitor USB ---------- */
+const manualInput = document.getElementById("manualInput");
+document.getElementById("manualForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  if (!manualInput.value.trim()) { manualInput.focus(); return; }
+  // leitor USB digita muito rápido; aqui não importa: tudo entra como digitado
+  if (handleCode(manualInput.value, "digitado")) manualInput.value = "";
+  manualInput.focus();
+});
+
+/* leitor USB com o foco fora do campo: junta dígitos digitados em rajada e termina no Enter */
+let burst = { text: "", at: 0 };
+document.addEventListener("keydown", (ev) => {
+  const t = ev.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  const now = Date.now();
+  if (now - burst.at > 80) burst.text = "";
+  burst.at = now;
+  if (/^[0-9Xx]$/.test(ev.key)) burst.text += ev.key;
+  else if (ev.key === "Enter" && burst.text.length >= 10) { ev.preventDefault(); handleCode(burst.text, "leitor USB"); burst.text = ""; }
+});
+
+/* ---------- Exemplo ---------- */
+document.getElementById("btnSample").addEventListener("click", () => handleCode("978-85-457-0287-0", "exemplo"));
+
+/* ---------- Desenho da fila ---------- */
+const listEl = document.getElementById("list");
+const emptyEl = document.getElementById("empty");
+const STATUS = {
+  buscando: ["wait", "Buscando dados"],
+  encontrado: ["ok", "Encontrado"],
+  nao_encontrado: ["warn", "Completar à mão"],
+  erro: ["err", "Sem conexão"]
+};
+let editingId = null;
+
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch])); }
+
+function render() {
+  const titles = queue.length;
+  const copies = queue.reduce((a, q) => a + q.copies, 0);
+  const missing = queue.filter(q => q.status === "nao_encontrado" || q.status === "erro").length;
+  document.getElementById("tTitles").textContent = titles;
+  document.getElementById("tCopies").textContent = copies;
+  document.getElementById("tMissing").textContent = missing;
+  emptyEl.hidden = titles > 0;
+  document.getElementById("btnExport").disabled = !titles;
+  document.getElementById("btnClear").disabled = !titles;
+
+  listEl.innerHTML = queue.map(q => {
+    const [cls, label] = STATUS[q.status] || STATUS.buscando;
+    const title = q.title
+      ? `<p class="title">${esc(q.title)}${q.subtitle ? ": " + esc(q.subtitle) : ""}</p>`
+      : `<p class="title placeholder">${q.status === "buscando" ? "Buscando título…" : "Título não encontrado"}</p>`;
+    const by = [q.authors, [q.publisher, q.year].filter(Boolean).join(", ")].filter(Boolean).join(" · ");
+    const cover = q.cover
+      ? `<img src="${esc(q.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+      : `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4z"/><path d="M5 17a3 3 0 0 1 3-3h11"/></svg>`;
+    const editing = editingId === q.id;
+    return `<li class="card" id="${q.id}">
+      <div class="cover">${cover}</div>
+      <div class="body">
+        <div class="meta-top">
+          <span class="ficha">ficha ${String(q.n).padStart(3, "0")}</span>
+          <span class="pill ${cls}">${label}</span>
+          <span>${esc(q.via)}${q.source ? " · " + esc(q.source) : ""}</span>
+        </div>
+        ${title}
+        ${by ? `<p class="byline">${esc(by)}</p>` : ""}
+        <div class="isbn" title="ISBN-13${q.from10 ? " (convertido de " + esc(q.from10) + ")" : ""}">${esc(ISBN.pretty(q.isbn).slice(0, -1))}<span class="check" title="dígito verificador">${q.isbn.slice(-1)}</span>${q.from10 ? ` <span style="color:var(--muted)">← ${esc(q.from10)}</span>` : ""}</div>
+        <div class="row-actions">
+          <span class="copies" aria-label="Exemplares">
+            <button type="button" data-act="minus" data-id="${q.id}" aria-label="Menos um exemplar">−</button>
+            <span>${q.copies} ${q.copies > 1 ? "exemplares" : "exemplar"}</span>
+            <button type="button" data-act="plus" data-id="${q.id}" aria-label="Mais um exemplar">+</button>
+          </span>
+          <button class="btn small ghost" type="button" data-act="edit" data-id="${q.id}">${editing ? "Fechar" : (q.status === "encontrado" ? "Corrigir" : "Completar")}</button>
+          ${q.status === "erro" ? `<button class="btn small" type="button" data-act="retry" data-id="${q.id}">Buscar de novo</button>` : ""}
+          <button class="btn small ghost danger" type="button" data-act="remove" data-id="${q.id}">Remover</button>
+        </div>
+      </div>
+      ${editing ? `<form class="edit" data-id="${q.id}">
+        <label>Título<input name="title" id="ed-title-${q.id}" value="${esc(q.title)}" required></label>
+        <label>Autor(es)<input name="authors" id="ed-authors-${q.id}" value="${esc(q.authors)}" placeholder="Separe com ponto e vírgula"></label>
+        <div class="two">
+          <label>Editora<input name="publisher" id="ed-publisher-${q.id}" value="${esc(q.publisher)}"></label>
+          <label>Ano<input name="year" id="ed-year-${q.id}" value="${esc(q.year)}" inputmode="numeric" maxlength="4"></label>
+        </div>
+        <div><button class="btn small primary" type="submit">Salvar</button></div>
+      </form>` : ""}
+    </li>`;
+  }).join("");
+}
+
+listEl.addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-act]");
+  if (!b) return;
+  const q = queue.find(x => x.id === b.dataset.id);
+  if (!q) return;
+  const act = b.dataset.act;
+  if (act === "plus") q.copies++;
+  else if (act === "minus") q.copies = Math.max(1, q.copies - 1);
+  else if (act === "remove") { queue = queue.filter(x => x !== q); toast("Removido da fila.", "ok"); }
+  else if (act === "edit") editingId = editingId === q.id ? null : q.id;
+  else if (act === "retry") { resolveItem(q); return; }
+  persist(); render();
+  if (act === "edit" && editingId) { const f = document.getElementById("ed-title-" + q.id); f && f.focus(); }
+});
+
+listEl.addEventListener("submit", (ev) => {
+  const form = ev.target.closest("form.edit");
+  if (!form) return;
+  ev.preventDefault();
+  const q = queue.find(x => x.id === form.dataset.id);
+  if (!q) return;
+  const fd = new FormData(form);
+  q.title = String(fd.get("title") || "").trim();
+  q.subtitle = q.title ? q.subtitle : "";
+  q.authors = String(fd.get("authors") || "").trim();
+  q.publisher = String(fd.get("publisher") || "").trim();
+  q.year = String(fd.get("year") || "").trim();
+  if (q.title && q.status !== "encontrado") { q.status = "encontrado"; q.source = "preenchido à mão"; }
+  editingId = null;
+  persist(); render(); flashCard(q.id);
+});
+
+function flashCard(id) {
+  requestAnimationFrame(() => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.add("flash");
+    el.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    setTimeout(() => el.classList.remove("flash"), 1200);
+  });
+}
+
+/* ---------- Planilha (uma linha por exemplar) ---------- */
+document.getElementById("btnExport").addEventListener("click", () => {
+  const head = ["tombo", "isbn", "titulo", "subtitulo", "autores", "editora", "ano", "paginas", "categoria", "origem", "data_leitura", "fonte_dos_dados", "situacao"];
+  const rows = [head];
+  [...queue].reverse().forEach(q => {
+    for (let i = 0; i < q.copies; i++) {
+      rows.push(["", q.isbn, q.title, q.subtitle, q.authors, q.publisher, q.year, q.pages, "", "",
+        q.readAt.slice(0, 10), q.source, (STATUS[q.status] || [, ""])[1]]);
+    }
+  });
+  const csv = rows.map(r => r.map(v => {
+    const s = String(v == null ? "" : v);
+    return /[;"\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(";")).join("\r\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "fila-isbn-" + new Date().toISOString().slice(0, 10) + ".csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast("Planilha gerada com " + (rows.length - 1) + " linhas (uma por exemplar).", "ok");
+});
+
+/* limpar com confirmação na própria página */
+const btnClear = document.getElementById("btnClear");
+let clearArmed = 0;
+btnClear.addEventListener("click", () => {
+  if (Date.now() - clearArmed < 3500) {
+    queue = []; seq = 0; clearArmed = 0; editingId = null;
+    btnClear.textContent = "Limpar fila";
+    persist(); render(); toast("Fila apagada.", "ok");
+    return;
+  }
+  clearArmed = Date.now();
+  btnClear.textContent = "Toque de novo para apagar tudo";
+  setTimeout(() => { if (Date.now() - clearArmed >= 3400) btnClear.textContent = "Limpar fila"; }, 3600);
+});
+
+/* ---------- Aviso flutuante ---------- */
+const toastEl = document.getElementById("toast"), toastMsg = document.getElementById("toastMsg"), toastBtn = document.getElementById("toastBtn");
+let toastTimer = 0, toastAction = null;
+function toast(msg, kind = "ok", action) {
+  toastMsg.textContent = msg;
+  toastEl.className = "toast " + kind;
+  toastAction = action || null;
+  toastBtn.hidden = !action;
+  if (action) toastBtn.textContent = action.label;
+  toastEl.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, action ? 6000 : 3500);
+}
+function hideToast() { toastEl.hidden = true; toastAction = null; }
+toastBtn.addEventListener("click", () => { const a = toastAction; hideToast(); a && a.run(); });
+
+/* ---------- Início ---------- */
+document.getElementById("httpsNotice").hidden = !!window.isSecureContext;
+(async () => {
+  try {
+    if ("BarcodeDetector" in window) {
+      const f = await window.BarcodeDetector.getSupportedFormats();
+      document.getElementById("engineName").textContent = f.includes("ean_13") ? "nativa do navegador (BarcodeDetector)" : "ZXing (JavaScript), carrega ao abrir a câmera";
+    } else {
+      document.getElementById("engineName").textContent = "ZXing (JavaScript), carrega ao abrir a câmera";
+    }
+  } catch (_) { document.getElementById("engineName").textContent = "ZXing (JavaScript)"; }
+})();
+// itens que ficaram "buscando" quando a página fechou voltam a buscar
+queue.filter(q => q.status === "buscando").forEach(resolveItem);
+render();
+</script>
+</body>
+</html>
