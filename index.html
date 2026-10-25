@@ -250,6 +250,8 @@ button, input { font: inherit; color: inherit; }
   border: 1.5px solid var(--line); background: var(--surface); color: var(--accent); font-weight: 700; text-decoration: none;
 }
 .search a:hover { border-color: var(--accent); }
+.refetch { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.refetch label { flex: 1 1 200px; }
 .edit .two { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; }
 
 /* Aviso flutuante */
@@ -451,6 +453,7 @@ function remember(q) {
   const c = {};
   FIELDS.forEach(f => { c[f] = q[f] || ""; });
   c.source = "sua correção";
+  c.isbnOficial = q.isbnOficial || "";
   corrections[q.isbn] = c;
   try { localStorage.setItem(CORR_KEY, JSON.stringify(corrections)); } catch (_) {}
 }
@@ -931,7 +934,8 @@ function render() {
         </div>
         ${title}
         ${by ? `<p class="byline">${esc(by)}</p>` : ""}
-        <div class="isbn" title="ISBN-13${q.from10 ? " (convertido de " + esc(q.from10) + ")" : ""}">${esc(ISBN.pretty(q.isbn).slice(0, -1))}<span class="check" title="dígito verificador">${q.isbn.slice(-1)}</span>${q.from10 ? ` <span style="color:var(--muted)">← ${esc(q.from10)}</span>` : ""}</div>
+        <div class="isbn" title="ISBN-13${q.from10 ? " (convertido de " + esc(q.from10) + ")" : ""}">${esc(ISBN.pretty(q.isbn))}<span class="check" title="dígito verificador">${q.isbn.slice(-1)}</span>${q.from10 ? ` <span style="color:var(--muted)">← ${esc(q.from10)}</span>` : ""}</div>
+        ${q.isbnOficial ? `<p class="byline">ISBN certo (CBL): <span class="isbn">${esc(q.isbnOficial)}</span></p>` : ""}
         <div class="row-actions">
           <span class="copies" aria-label="Exemplares">
             <button type="button" data-act="minus" data-id="${q.id}" aria-label="Menos um exemplar">−</button>
@@ -946,6 +950,10 @@ function render() {
       </div>
       ${editing ? `<form class="edit" data-id="${q.id}">
         <p class="search">Veja qual é o livro: ${searchLinks(q.isbn)}</p>
+        <div class="refetch">
+          <label>A CBL mostrou outro ISBN para este livro? Digite aqui<input name="isbnOficial" id="ed-isbn2-${q.id}" value="${esc(q.isbnOficial || "")}" inputmode="numeric" placeholder="978 65 0000 000 0"></label>
+          <button class="btn small" type="button" data-act="refetch" data-id="${q.id}">Buscar dados</button>
+        </div>
         <label>Título<input name="title" id="ed-title-${q.id}" value="${esc(q.title)}" required></label>
         <label>Autor(es)<input name="authors" id="ed-authors-${q.id}" value="${esc(q.authors)}" placeholder="Separe com ponto e vírgula"></label>
         <div class="two">
@@ -970,6 +978,7 @@ listEl.addEventListener("click", (ev) => {
   else if (act === "edit") editingId = editingId === q.id ? null : q.id;
   else if (act === "retry") { resolveItem(q); return; }
   else if (act === "choose") { openChooser(q); return; }
+  else if (act === "refetch") { refetchOfficial(q); return; }
   persist(); render();
   if (act === "edit" && editingId) { const f = document.getElementById("ed-title-" + q.id); f && f.focus(); }
 });
@@ -985,6 +994,8 @@ listEl.addEventListener("submit", (ev) => {
   // título trocado: capa, subtítulo e páginas eram do livro errado
   if (titleKey(newTitle) !== titleKey(q.title)) { q.subtitle = ""; q.cover = ""; q.pages = ""; }
   q.title = newTitle;
+  const oficial = ISBN.normalize(fd.get("isbnOficial"));
+  q.isbnOficial = oficial.isbn && oficial.isbn !== q.isbn ? oficial.isbn : "";
   q.authors = String(fd.get("authors") || "").trim();
   q.publisher = String(fd.get("publisher") || "").trim();
   q.year = String(fd.get("year") || "").trim();
@@ -993,6 +1004,25 @@ listEl.addEventListener("submit", (ev) => {
   editingId = null;
   persist(); render(); flashCard(q.id);
 });
+
+/* Editoras às vezes imprimem um ISBN que pertence a outro livro, e a CBL registra depois
+   o número certo. Os dados vêm pelo ISBN oficial, mas o item continua com o código
+   impresso, que é o que a câmera lê nas próximas vezes. */
+async function refetchOfficial(q) {
+  const r = ISBN.normalize(document.getElementById("ed-isbn2-" + q.id).value);
+  if (r.error) { toast(ERR_MSG[r.error], "warn"); return; }
+  if (r.isbn === q.isbn) { toast("Esse é o mesmo ISBN impresso no livro. Digite o que a CBL mostrou.", "warn"); return; }
+  toast("Buscando pelo ISBN " + r.isbn + "…", "ok");
+  const res = await lookup(r.isbn);
+  if (!res.options) { toast(res.offline ? "Sem conexão. Tente de novo." : "Esse ISBN também não foi encontrado nas fontes.", "warn"); return; }
+  const o = res.options[0];
+  FIELDS.forEach(f => { q[f] = o[f] || ""; });
+  q.isbnOficial = r.isbn; q.alts = []; q.status = "encontrado";
+  q.source = o.source + " pelo ISBN certo";
+  remember(q);
+  editingId = null; persist(); render(); flashCard(q.id);
+  toast("Pronto! Dados do ISBN certo. O código impresso continua reconhecido nas próximas leituras.", "ok");
+}
 
 /* atalhos para conferir o livro em sites de venda e no Google, já com o ISBN */
 function searchLinks(isbn) {
@@ -1069,11 +1099,11 @@ document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && sheetF
 
 /* ---------- Planilha (uma linha por exemplar) ---------- */
 document.getElementById("btnExport").addEventListener("click", () => {
-  const head = ["tombo", "isbn", "titulo", "subtitulo", "autores", "editora", "ano", "paginas", "categoria", "origem", "data_leitura", "fonte_dos_dados", "situacao", "outros_titulos"];
+  const head = ["tombo", "isbn", "isbn_oficial", "titulo", "subtitulo", "autores", "editora", "ano", "paginas", "categoria", "origem", "data_leitura", "fonte_dos_dados", "situacao", "outros_titulos"];
   const rows = [head];
   [...queue].reverse().forEach(q => {
     for (let i = 0; i < q.copies; i++) {
-      rows.push(["", q.isbn, q.title, q.subtitle, q.authors, q.publisher, q.year, q.pages, "", "",
+      rows.push(["", q.isbn, q.isbnOficial || "", q.title, q.subtitle, q.authors, q.publisher, q.year, q.pages, "", "",
         q.readAt.slice(0, 10), q.source, (STATUS[q.status] || [, ""])[1],
         (q.alts || []).map(a => a.title + " (" + a.source + ")").join(" | ")]);
     }
